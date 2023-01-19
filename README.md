@@ -1,2 +1,2 @@
 # gaggia_mod
-ESP8266 scatch to monitor temperature and brewing time of an espresso machine
+ESP8266 sketch to monitor temperature and brewing time of an espresso machine
