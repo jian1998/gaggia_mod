@@ -4,20 +4,30 @@
 // select "LOLIN(WEMOS) D1 R2 & mini" device    
 //
 //==========================================
- 
-#include <ESP8266WiFi.h>
-#include <PubSubClient.h>       // MQTT clienrt
-#include <ArduinoOTA.h>             // OTA
-#include <Wire.h>                   // I2C Library
-#include <time.h>
-#include <Adafruit_GFX.h>           // for LED display
-#include <Adafruit_SSD1306.h>       // for LED display
 
 //*********************************************
 // My network file defines MY_SSID, MY_PASSORD,
 // MY_MQTTSERVER_ADDRESS and MY_TIMEZONE.
 #include "netconfig.h"       // it is not checked in... 
 //*********************************************
+
+// define temperature sensor used (choose one)
+//#define TPM36
+#define LM135
+
+// uncomment the following line if no WiFi needed
+//#define NO_WIFI
+
+#ifndef NO_WIFI
+#include <ESP8266WiFi.h>
+#include <PubSubClient.h>       // MQTT clienrt
+#include <ArduinoOTA.h>             // OTA
+#endif
+#include <Wire.h>                   // I2C Library
+#include <time.h>
+#include <Adafruit_GFX.h>           // for LED display
+#include <Adafruit_SSD1306.h>       // for LED display
+
 
 #define BUILT_IN_LED    D4
 #define ESP_SCL         D5          // LED display
@@ -26,23 +36,13 @@
 #define PUMP_ON         D3          // front panel swith to start brew
 
 
-const char* DEVICE_NAME = "Gaggia";  // device name.
+const char* DEVICE_NAME = "Gaggia_2";  // device name.
 const char* FW_REV = "1.0";         // firmware revision
 
-// Update these with values suitable for your network.
-const char* ssid = MY_SSID;                       // SSID of your WiFi
-const char* password = MY_PASSORD;                // Your WiFi password
-const char* mqtt_server = MY_MQTTSERVER_ADDRESS;  // MQTT brooker address
+const float steam_temp = 119.;                // above 119 degree C is considered in steam mode.
+const int steam_temp_before_alarm = 600000;   // sound alarm if temperatuer > steam_temp for over 10 min. 
+const long last_brew_linger_time_ms = 5000;   // the brew time will stay for 5 sec after brew switch is turned off.
 
-// See https://github.com/nayarsystems/posix_tz_db/blob/master/zones.csv for Timezone codes for your region
-// for example: "EST5EDT,M3.2.0,M11.1.0" NY/USA time.
-const char* my_timezone = MY_TIMEZONE;    
-
-const float steam_temp = 123.;                // above 123 degree C is considered in steam mode.
-const int steam_temp_before_alarm = 300000;   // sound alarm if temperatuer > steam_temp for over 5 min. 
-
-WiFiClient espClient;
-PubSubClient client(espClient);
 //long lastMsg = 0;
 long lastLEDUpdate = 0;
 long lastMQTTUpdate = 0;
@@ -54,9 +54,25 @@ bool isPumpOn = 0;
 bool isSteamOn = 0;
 long SteamOn_time = 0;
 bool alarmOn = true;
+float last_brew_time = 0.;
 
 long pumpStartTime_ms = 0;
+long pumpStopTime_ms = 0;
 Adafruit_SSD1306 display(128,64,&Wire); 
+
+
+
+#ifndef NO_WIFI
+// Update these with values suitable for your network.
+const char* ssid = MY_SSID;                       // SSID of your WiFi
+const char* password = MY_PASSORD;                // Your WiFi password
+const char* mqtt_server = MY_MQTTSERVER_ADDRESS;  // MQTT brooker address
+
+// See https://github.com/nayarsystems/posix_tz_db/blob/master/zones.csv for Timezone codes for your region
+// for example: "EST5EDT,M3.2.0,M11.1.0" NY/USA time.
+const char* my_timezone = MY_TIMEZONE;    
+WiFiClient espClient;
+PubSubClient client(espClient);
 
 
 void setup_wifi() {
@@ -124,7 +140,7 @@ void reconnect() {
   while (!client.connected()) {
     Serial.print("Attempting MQTT connection...");
     // Attempt to connect
-    if (client.connect("Gaggia_temperature_sensor")) {
+    if (client.connect(DEVICE_NAME)) {
       Serial.println("connected");
     } else {
       Serial.print("failed, rc=");
@@ -136,6 +152,7 @@ void reconnect() {
   }
 }
 
+#endif
 
 void display_opening_screen()
 {
@@ -195,12 +212,14 @@ void update_display(float currentTemp, float brewTimeSec)
     display.setTextSize(1);
     display.println("");
     display.println("");
+#ifndef NO_WIFI
     time_t now;
     time(&now);
     char time_output[30];
     // See http://www.cplusplus.com/reference/ctime/strftime/ for strftime functions
     strftime(time_output, 30, "%a %D %T", localtime(&now)); 
     display.println(time_output);
+#endif
   }
   display.display();
 
@@ -209,7 +228,7 @@ void update_display(float currentTemp, float brewTimeSec)
 
 float averageTemp(float currentTemp)
 {
-  const float alpha = .1;
+  const float alpha = .2;
   static float avgTmp = 20;
   avgTmp = avgTmp + alpha *(currentTemp - avgTmp);
   return avgTmp;
@@ -225,34 +244,45 @@ void setup(void)
   pinMode(ALARM, OUTPUT);
  
   digitalWrite(ALARM, 0);      
-
+#ifndef NO_WIFI
   setup_wifi();
   client.setServer(mqtt_server, 1883);
   
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
  
   setenv("TZ", my_timezone, 1); 
-
+#endif
 }
 
 void loop(void)
 {
+#ifndef NO_WIFI
   ArduinoOTA.handle();
 
   if (!client.connected()) {
     reconnect();
   }
   client.loop();
+#endif
   delay(200);
   long now = millis();
 
   int rawvoltage = analogRead(A0);
   rawvoltage = analogRead(A0);
-
+#ifdef LM135
+//LM135 ouptup go through 200K ohm + 220K(R1) 100K(R2) D1 mini buit-in res. 
+ float millivolts = (rawvoltage / 1024.0) * 5000; 
+  Serial.print(millivolts);
+  Serial.println(" mV");
+ //celsius = (millivolts - 500.)/10.;
+  celsius = (millivolts)/10. - 273.15;
+#endif
+#ifdef  TPM36
   float millivolts = (rawvoltage / 1024.0) * 3050; 
   Serial.print(millivolts);
   Serial.println(" mV");
   celsius = (millivolts - 500.)/10.;
+#endif
   float avgTemp = averageTemp(celsius);
 
   if (now - lastLEDUpdate > 1000) 
@@ -264,20 +294,24 @@ void loop(void)
 
     if(isPumpOn)
     {
-      update_display(avgTemp, (millis() - pumpStartTime_ms)/1000.0 );
+      last_brew_time = (millis() - pumpStartTime_ms)/1000.0;
+      update_display(avgTemp, last_brew_time );
     }
     else
     {
-      update_display(avgTemp, 0.);      
+      if(last_brew_time > 0 && (millis() - pumpStopTime_ms) > last_brew_linger_time_ms) 
+        last_brew_time = 0;
+      update_display(avgTemp, last_brew_time);      
     }
     
   }
+#ifndef NO_WIFI
   if (now - lastMQTTUpdate > 30000) 
   {
     lastMQTTUpdate = now;
     client.publish("ha/temperature/gaggia", String(avgTemp).c_str(), false);
   }
-
+#endif
   if(avgTemp > steam_temp)
   {
     if(!isSteamOn)
@@ -323,6 +357,7 @@ void loop(void)
     if(isPumpOn)
     {
       isPumpOn = false;
+      pumpStopTime_ms = millis();
     }
   }
 
