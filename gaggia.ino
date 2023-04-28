@@ -16,7 +16,7 @@
 #define LM135
 
 // uncomment the following line if no WiFi needed
-//#define NO_WIFI
+#define NO_WIFI
 
 #ifndef NO_WIFI
 #include <ESP8266WiFi.h>
@@ -36,8 +36,8 @@
 #define PUMP_ON         D3          // front panel swith to start brew
 
 
-const char* DEVICE_NAME = "Gaggia_2";  // device name.
-const char* FW_REV = "1.0";         // firmware revision
+const char* DEVICE_NAME = "Gaggia";  // device name.
+const char* FW_REV = "1.1";         // firmware revision
 
 const float steam_temp = 119.;                // above 119 degree C is considered in steam mode.
 const int steam_temp_before_alarm = 600000;   // sound alarm if temperatuer > steam_temp for over 10 min. 
