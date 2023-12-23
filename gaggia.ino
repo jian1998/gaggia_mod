@@ -1,28 +1,34 @@
 
-//==========================================
+//==================================================================================
 //
 // select "LOLIN(WEMOS) D1 R2 & mini" device    
 //
-//==========================================
+// FW Rev 1.1  - initial release
+// FW Rev 1.2  - brew time roud to 0.5 and display update rate change to 100 ms.
+// FW Rev 1.3  - add remote control of Govee smart switch control for auto-shutoff.
+//===================================================================================
 
-//*********************************************
-// My network file defines MY_SSID, MY_PASSORD,
-// MY_MQTTSERVER_ADDRESS and MY_TIMEZONE.
+//*******************************************************
+// modify "dummy_netconfig.h" to match your configuration
+// and rename it "netconfig.h"
+//*******************************************************
 #include "netconfig.h"       // it is not checked in... 
-//*********************************************
 
 // define temperature sensor used (choose one)
 //#define TPM36
 #define LM135
 
 // uncomment the following line if no WiFi needed
-#define NO_WIFI
+//#define NO_WIFI
 
 #ifndef NO_WIFI
 #include <ESP8266WiFi.h>
 #include <PubSubClient.h>       // MQTT clienrt
-#include <ArduinoOTA.h>             // OTA
+#include <WiFiClientSecure.h>
+#include <ESP8266HTTPClient.h>
+#include <ArduinoOTA.h>            // OTA
 #endif
+
 #include <Wire.h>                   // I2C Library
 #include <time.h>
 #include <Adafruit_GFX.h>           // for LED display
@@ -37,11 +43,12 @@
 
 
 const char* DEVICE_NAME = "Gaggia";  // device name.
-const char* FW_REV = "1.1";         // firmware revision
+const char* FW_REV = "1.3";         // firmware revision
 
 const float steam_temp = 119.;                // above 119 degree C is considered in steam mode.
 const int steam_temp_before_alarm = 600000;   // sound alarm if temperatuer > steam_temp for over 10 min. 
 const long last_brew_linger_time_ms = 5000;   // the brew time will stay for 5 sec after brew switch is turned off.
+const long auto_shutoff_time_ms = 1*60*60*1000;   // auto shut off 1 hrs after last brew time.
 
 //long lastMsg = 0;
 long lastLEDUpdate = 0;
@@ -59,7 +66,7 @@ float last_brew_time = 0.;
 long pumpStartTime_ms = 0;
 long pumpStopTime_ms = 0;
 Adafruit_SSD1306 display(128,64,&Wire); 
-
+long last_brew_time_for_auto_off = 0;
 
 
 #ifndef NO_WIFI
@@ -68,11 +75,38 @@ const char* ssid = MY_SSID;                       // SSID of your WiFi
 const char* password = MY_PASSORD;                // Your WiFi password
 const char* mqtt_server = MY_MQTTSERVER_ADDRESS;  // MQTT brooker address
 
+// Root certificate for developer-api.govee.com
+const char IRG_Root_X1 [] PROGMEM = R"CERT(
+-----BEGIN CERTIFICATE-----
+MIIDQTCCAimgAwIBAgITBmyfz5m/jAo54vB4ikPmljZbyjANBgkqhkiG9w0BAQsF
+ADA5MQswCQYDVQQGEwJVUzEPMA0GA1UEChMGQW1hem9uMRkwFwYDVQQDExBBbWF6
+b24gUm9vdCBDQSAxMB4XDTE1MDUyNjAwMDAwMFoXDTM4MDExNzAwMDAwMFowOTEL
+MAkGA1UEBhMCVVMxDzANBgNVBAoTBkFtYXpvbjEZMBcGA1UEAxMQQW1hem9uIFJv
+b3QgQ0EgMTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBALJ4gHHKeNXj
+ca9HgFB0fW7Y14h29Jlo91ghYPl0hAEvrAIthtOgQ3pOsqTQNroBvo3bSMgHFzZM
+9O6II8c+6zf1tRn4SWiw3te5djgdYZ6k/oI2peVKVuRF4fn9tBb6dNqcmzU5L/qw
+IFAGbHrQgLKm+a/sRxmPUDgH3KKHOVj4utWp+UhnMJbulHheb4mjUcAwhmahRWa6
+VOujw5H5SNz/0egwLX0tdHA114gk957EWW67c4cX8jJGKLhD+rcdqsq08p8kDi1L
+93FcXmn/6pUCyziKrlA4b9v7LWIbxcceVOF34GfID5yHI9Y/QCB/IIDEgEw+OyQm
+jgSubJrIqg0CAwEAAaNCMEAwDwYDVR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAMC
+AYYwHQYDVR0OBBYEFIQYzIU07LwMlJQuCFmcx7IQTgoIMA0GCSqGSIb3DQEBCwUA
+A4IBAQCY8jdaQZChGsV2USggNiMOruYou6r4lK5IpDB/G/wkjUu0yKGX9rbxenDI
+U5PMCCjjmCXPI6T53iHTfIUJrU6adTrCC2qJeHZERxhlbI1Bjjt/msv0tadQ1wUs
+N+gDS63pYaACbvXy8MWy7Vu33PqUXHeeE6V/Uq2V8viTO96LXFvKWlJbYK8U90vv
+o/ufQJVtMVT8QtPHRh8jrdkPSHCa2XV4cdFyQzR1bldZwgJcJmApzyMZFo6IQ6XU
+5MsI+yMRQ+hDKXJioaldXgjUkK642M4UwtBV8ob2xJNDd2ZhwLnoQdeXeGADbkpy
+rqXRfboQnoZsG4q5WTP468SQvvG5
+-----END CERTIFICATE-----
+)CERT";
+
 // See https://github.com/nayarsystems/posix_tz_db/blob/master/zones.csv for Timezone codes for your region
 // for example: "EST5EDT,M3.2.0,M11.1.0" NY/USA time.
 const char* my_timezone = MY_TIMEZONE;    
 WiFiClient espClient;
 PubSubClient client(espClient);
+
+// Create a list of certificates with the server certificate
+X509List cert(IRG_Root_X1);
 
 
 void setup_wifi() {
@@ -152,6 +186,21 @@ void reconnect() {
   }
 }
 
+void turn_off_govee_sw()
+{
+  WiFiClientSecure https_client;
+  HTTPClient https;
+  https_client.setTrustAnchors(&cert);
+  if (https.begin(https_client, "https://developer-api.govee.com/v1/devices/control")) 
+  {
+    // start connection and send HTTP header
+    https.addHeader("Govee-API-Key", MY_API_KEY);
+    https.addHeader("Content-Type", "application/json");
+    https.PUT(String("{\"device\":\"") + String(MY_SWITCH_ID) + String("\", \"model\":\"H5080\",\"cmd\": {\"name\":\"turn\",\"value\":\"off\"}}"));
+    https.end();
+  }
+}
+
 #endif
 
 void display_opening_screen()
@@ -175,6 +224,7 @@ void display_opening_screen()
   display.println("       FW: " + String(FW_REV));
 
   display.display();
+  delay(1000);
 }
 
 void update_display(float currentTemp, float brewTimeSec)
@@ -239,6 +289,13 @@ void setup(void)
   // start serial port
   Serial.begin(115200);
   display_opening_screen();
+
+  float x = 12.0f;
+  int k;
+  for(k = 0;k< 10; k++)
+    Serial.println(String(floor((x+(float)k/10.f)* 2) / 2.0f).c_str());
+
+
   
   pinMode(BUILT_IN_LED, OUTPUT);   // built-in LED
   pinMode(ALARM, OUTPUT);
@@ -252,6 +309,7 @@ void setup(void)
  
   setenv("TZ", my_timezone, 1); 
 #endif
+  last_brew_time_for_auto_off = millis();
 }
 
 void loop(void)
@@ -268,13 +326,12 @@ void loop(void)
   long now = millis();
 
   int rawvoltage = analogRead(A0);
-  rawvoltage = analogRead(A0);
+  rawvoltage = analogRead(A0);  // read twice to get more stable reading
 #ifdef LM135
 //LM135 ouptup go through 200K ohm + 220K(R1) 100K(R2) D1 mini buit-in res. 
  float millivolts = (rawvoltage / 1024.0) * 5000; 
   Serial.print(millivolts);
   Serial.println(" mV");
- //celsius = (millivolts - 500.)/10.;
   celsius = (millivolts)/10. - 273.15;
 #endif
 #ifdef  TPM36
@@ -285,7 +342,7 @@ void loop(void)
 #endif
   float avgTemp = averageTemp(celsius);
 
-  if (now - lastLEDUpdate > 1000) 
+  if (now - lastLEDUpdate > 100) 
   {
     //client.publish("ha/temperature/ec155", String(avgTemp).c_str(), true);
     lastLEDUpdate = now;
@@ -294,7 +351,8 @@ void loop(void)
 
     if(isPumpOn)
     {
-      last_brew_time = (millis() - pumpStartTime_ms)/1000.0;
+      // round a number to 0.5: floor(x * 2) / 2.0f
+      last_brew_time = floor((millis() - pumpStartTime_ms)/1000.0 * 2.0) / 2.0;
       update_display(avgTemp, last_brew_time );
     }
     else
@@ -348,6 +406,7 @@ void loop(void)
     {
       isPumpOn = true;
       pumpStartTime_ms = millis();
+      last_brew_time_for_auto_off = pumpStartTime_ms;
       isSteamOn = false;
       digitalWrite(ALARM, 0);
     }
@@ -360,7 +419,16 @@ void loop(void)
       pumpStopTime_ms = millis();
     }
   }
-
-
-
+  
+#ifndef NO_WIFI
+  //-------------
+  // auto shutoff
+  //-------------
+  if(millis() - last_brew_time_for_auto_off > auto_shutoff_time_ms) 
+  {
+    //client.publish("ha/coffee_machine_power_sw/cmd", "off", false);   
+    turn_off_govee_sw();
+    last_brew_time_for_auto_off += 10000; // issue shutoff command again if not being turned off
+  }
+#endif
 }
